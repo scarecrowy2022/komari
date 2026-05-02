@@ -153,7 +153,7 @@ func parseTemplate(messageTemplate string, event models.EventMessage) string {
 	replaceMap := map[string]string{
 		"{{event}}":   event.Event,
 		"{{client}}":  joinedClients,
-		"{{time}}":    event.Time.Format(time.RFC3339),
+		"{{time}}": event.Time.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05 CST+8"),
 		"{{message}}": event.Message,
 		"{{emoji}}":   event.Emoji,
 	}
