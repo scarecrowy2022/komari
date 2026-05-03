@@ -50,7 +50,7 @@ jobs:
 
       - name: Install Zig
         run: |
-          wget https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.13.0.tar.xz
+          wget https://ziglang.org/download/0.13.0/zig-x86_64-linux-0.13.0.tar.xz
           sudo tar -C /usr/local -Jxf zig-x86_64-linux-0.13.0.tar.xz
           echo "/usr/local/zig-x86_64-linux-0.13.0" >> $GITHUB_PATH
 
