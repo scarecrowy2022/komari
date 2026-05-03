@@ -61,7 +61,7 @@ jobs:
           GIN_MODE: release
         run: |
           VERSION="v2026.05"
-          VERSION_HASH="Modified_YJ"
+          VERSION_HASH="YJ_Mod"
           LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X 'github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}'"
 
           echo "Building for linux/amd64..."
