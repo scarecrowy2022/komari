@@ -50,9 +50,9 @@ jobs:
 
       - name: Install Zig
         run: |
-          wget https://ziglang.org/download/0.13.0/zig-x86_64-linux-0.13.0.tar.xz
-          sudo tar -C /usr/local -Jxf zig-x86_64-linux-0.13.0.tar.xz
-          echo "/usr/local/zig-x86_64-linux-0.13.0" >> $GITHUB_PATH
+          wget https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
+          sudo tar -C /usr/local -Jxf zig-linux-x86_64-0.13.0.tar.xz
+          echo "/usr/local/zig-linux-x86_64-0.13.0" >> $GITHUB_PATH
 
       - name: Build static binaries for multi-arch
         env:
