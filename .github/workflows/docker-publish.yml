@@ -61,8 +61,8 @@ jobs:
           GIN_MODE: release
         run: |
           VERSION="v2026.05"
-          VERSION_HASH="Modified by YJ"
-          LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}"
+          VERSION_HASH="Modified_YJ"
+          LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X 'github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}'"
 
           echo "Building for linux/amd64..."
           GOARCH=amd64 CC="zig cc -target x86_64-linux-musl" go build -trimpath -ldflags="$LDFLAGS" -o komari-linux-amd64
