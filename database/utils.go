@@ -8,13 +8,13 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/pkg/config"
 )
 
 func GetPublicInfo() (map[string]interface{}, error) {
-	cstPtr, err := config.GetManyAs[config.Legacy]()
+	cstPtr, err := config.GetManyAs[config.Settings]()
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +134,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		"oauth_enable":              cst.OAuthEnabled,
 		"oauth_provider":            cst.OAuthProvider,
 		"disable_password_login":    cst.DisablePasswordLogin,
-		"allow_cors":                cst.AllowCors,
+		"cors_origin_check_enabled": cst.CorsOriginCheckEnabled,
 		"record_enabled":            cst.RecordEnabled,
 		"record_preserve_time":      cst.RecordPreserveTime,
 		"ping_record_preserve_time": cst.PingRecordPreserveTime,

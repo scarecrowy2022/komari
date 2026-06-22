@@ -6,6 +6,11 @@
 
 Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单、高效的服务器性能监控解决方案。它支持通过 Web 界面查看服务器状态，并通过轻量级 Agent 收集数据。
 
+> [!WARNING]
+> Komari 是一款自托管的监控/控制程序，仅应部署在你拥有或已获得授权管理的系统上。请勿将 Komari 武器化，或在未获授权的情况下部署、访问、持久化、执行命令及从事其他滥用行为。关于现实中的滥用风险，可参考 Huntress 的分析：[Komari C2 agent abuse](https://www.huntress.com/blog/komari-c2-agent-abuse)。
+> 用户需要自行承担部署和使用 Komari 的责任。开发者不对未经授权或滥用行为及其后果承担责任。
+> 在 Windows 端开启远程控制后，客户端会在每次用户登录时通过 Windows 通知提醒用户 Komari 是一款远程控制软件。
+
 [文档](https://komari-document.pages.dev/) | [文档(镜像站 By Geekertao)](https://www.komari.wiki) | [Telegram 群组](https://t.me/komari_monitor)
 
 ## 特性
@@ -90,7 +95,7 @@ sudo ./install-komari.sh
    git clone https://github.com/komari-monitor/komari
    cd komari
    ```
-   将步骤1中生成的静态文件复制到 `komari` 项目根目录下的 `/public/defaultTheme/dist` 文件夹，并将 `komari-theme.json` 与 `preview.png`/`perview.png` 复制到 `/public/defaultTheme`。
+   将步骤1中生成的静态文件复制到 `komari` 项目根目录下的 `/web/public/defaultTheme/dist` 文件夹，并将 `komari-theme.json` 与 `preview.png`/`perview.png` 复制到 `/web/public/defaultTheme`。
    ```bash
    go build -o komari
    ```

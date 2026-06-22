@@ -6,10 +6,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -132,4 +132,13 @@ func UpdateLatest(session, useragent, ip string) error {
 		"latest_user_agent": useragent,
 		"latest_ip":         ip,
 	}).Error
+}
+
+func RemoveExpiredSessions() error {
+	db := dbcore.GetDBInstance()
+	result := db.Where("expires < ?", time.Now()).Delete(&models.Session{})
+	if result.Error != nil {
+		return result.Error
+	}
+	return nil
 }

@@ -2,16 +2,47 @@ package clients
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
-	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	v1 "github.com/komari-monitor/komari/protocol/v1"
+	"github.com/komari-monitor/komari/utils"
 
 	"gorm.io/gorm"
 )
+
+var reportSaveLocks sync.Map
+
+func getReportSaveLock(clientUUID string) *sync.Mutex {
+	lock, _ := reportSaveLocks.LoadOrStore(clientUUID, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
+func getLatestTrafficRecord(tx *gorm.DB, clientUUID string) (*models.Record, error) {
+	var record models.Record
+	err := tx.Where("client = ?", clientUUID).Order("time DESC").First(&record).Error
+	if err == nil {
+		return &record, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	err = tx.Table("records_long_term").Where("client = ?", clientUUID).Order("time DESC").First(&record).Error
+	if err == nil {
+		return &record, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	return nil, nil
+}
 
 // Report 表示客户端报告数据
 // SaveReport 保存报告数据
@@ -40,20 +71,20 @@ func GetClientUUIDByToken(token string) (clientUUID string, err error) {
 	return client.UUID, nil
 }
 
-func ParseReport(data map[string]interface{}) (report common.Report, err error) {
+func ParseReport(data map[string]interface{}) (report v1.Report, err error) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return common.Report{}, err
+		return v1.Report{}, err
 	}
 	err = json.Unmarshal(jsonData, &report)
 	if err != nil {
-		return common.Report{}, err
+		return v1.Report{}, err
 	}
 	return report, nil
 }
 
 // 检查数据防止异常数据导致数据库损坏
-func ReportVerify(report common.Report) error {
+func ReportVerify(report v1.Report) error {
 	// 防止输入不合理范围
 	if report.CPU.Usage < 0 || report.CPU.Usage > 100 {
 		return fmt.Errorf("CPU.Usage must be between 0 and 100")
@@ -137,11 +168,14 @@ func ReportVerify(report common.Report) error {
 }
 
 // SaveClientReport 保存客户端报告到 Record 表
-func SaveClientReport(clientUUID string, report common.Report) (err error) {
+func SaveClientReport(clientUUID string, report v1.Report) (err error) {
 	db := dbcore.GetDBInstance()
+	lock := getReportSaveLock(clientUUID)
+	lock.Lock()
+	defer lock.Unlock()
 
 	if err := ReportVerify(report); err != nil {
-		return fmt.Errorf("failed to save Record: %v", err)
+		return fmt.Errorf("failed to save Record: %w", err)
 	}
 
 	// 保存GPU详细记录到独立表
@@ -159,7 +193,7 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 				Temperature: gpu.Temperature,
 			}
 			if err := db.Create(&gpuRecord).Error; err != nil {
-				return fmt.Errorf("failed to save GPU record: %v", err)
+				return fmt.Errorf("failed to save GPU record: %w", err)
 			}
 		}
 	}
@@ -187,6 +221,8 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 		NetOut:         report.Network.Up,
 		NetTotalUp:     report.Network.TotalUp,
 		NetTotalDown:   report.Network.TotalDown,
+		TrafficUp:      0,
+		TrafficDown:    0,
 		Process:        report.Process,
 		Connections:    report.Connections.TCP,
 		ConnectionsUdp: report.Connections.UDP,
@@ -195,9 +231,18 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 
 	// 使用事务确保 Record 和 ClientsInfo 一致性
 	err = db.Transaction(func(tx *gorm.DB) error {
+		previous, err := getLatestTrafficRecord(tx, clientUUID)
+		if err != nil {
+			return fmt.Errorf("failed to load previous Record: %w", err)
+		}
+		if previous != nil {
+			Record.TrafficUp = utils.ComputeTrafficDelta(report.Network.TotalUp, previous.NetTotalUp)
+			Record.TrafficDown = utils.ComputeTrafficDelta(report.Network.TotalDown, previous.NetTotalDown)
+		}
+
 		// 保存 Record
 		if err := tx.Create(&Record).Error; err != nil {
-			return fmt.Errorf("failed to save Record: %v", err)
+			return fmt.Errorf("failed to save Record: %w", err)
 		}
 		return nil
 	})

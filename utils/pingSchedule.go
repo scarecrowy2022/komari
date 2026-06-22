@@ -2,18 +2,20 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/ws"
+	"github.com/komari-monitor/komari/pkg/corn"
+	v2 "github.com/komari-monitor/komari/protocol/v2"
+	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
 // PingTaskManager 管理定时器和任务
 type PingTaskManager struct {
-	mu         sync.Mutex
-	cancelFunc context.CancelFunc
-	tasks      map[int][]models.PingTask
+	mu    sync.Mutex
+	tasks map[int][]models.PingTask
 }
 
 var manager = &PingTaskManager{
@@ -25,12 +27,7 @@ func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.cancelFunc != nil {
-		m.cancelFunc()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelFunc = cancel
-
+	corn.RemovePrefix("ping:")
 	m.tasks = make(map[int][]models.PingTask)
 
 	// 按Interval分组任务
@@ -44,40 +41,22 @@ func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
 
 	// 为每个唯一的Interval创建协程
 	for interval, tasks := range taskGroups {
+		interval := interval
+		tasks := append([]models.PingTask(nil), tasks...)
 		m.tasks[interval] = tasks
-		go m.runPreciseLoop(ctx, time.Duration(interval)*time.Second, tasks)
+		if err := corn.AddContextFunc(fmt.Sprintf("ping:%d", interval), corn.Every(time.Duration(interval)*time.Second), false, func(ctx context.Context) {
+			for _, task := range tasks {
+				go executePingTask(ctx, task)
+			}
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (m *PingTaskManager) runPreciseLoop(ctx context.Context, interval time.Duration, tasks []models.PingTask) {
-	// Start the first timer.
-	timer := time.NewTimer(interval)
-
-	// This will be the reference point for all future ticks.
-	// By adding the interval to this time, we avoid accumulating execution delays.
-	nextTick := time.Now().Add(interval)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-timer.C:
-			onlineClients := ws.GetConnectedClients()
-			for _, task := range tasks {
-				go executePingTask(ctx, task, onlineClients)
-			}
-
-			nextTick = nextTick.Add(interval)
-			timer.Reset(time.Until(nextTick))
-
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
 // executePingTask 执行单个PingTask
-func executePingTask(ctx context.Context, task models.PingTask, onlineClients map[string]*ws.SafeConn) {
+func executePingTask(ctx context.Context, task models.PingTask) {
 	var message struct {
 		TaskID  uint   `json:"ping_task_id"`
 		Message string `json:"message"`
@@ -90,7 +69,7 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 	message.Type = task.Type
 	message.Target = task.Target
 
-	for _, clientUUID := range task.Clients {
+	for _, clientUUID := range targetPingClientUUIDs(task) {
 		select {
 		case <-ctx.Done():
 			// Context was canceled, stop sending pings.
@@ -99,12 +78,13 @@ func executePingTask(ctx context.Context, task models.PingTask, onlineClients ma
 			// Context is still active, continue.
 		}
 
-		if conn, exists := onlineClients[clientUUID]; exists && conn != nil {
-			if err := conn.WriteJSON(message); err != nil {
-				continue
-			}
-		}
+		agent_runtime.DispatchPing(clientUUID, message, v2.PingParams{TaskID: task.Id, Type: task.Type, Target: task.Target})
 	}
+}
+
+// targetPingClientUUIDs 根据任务配置计算本次调度需要下发的在线服务器列表。
+func targetPingClientUUIDs(task models.PingTask) []string {
+	return task.Clients
 }
 
 // ReloadPingSchedule 加载或重载时间表

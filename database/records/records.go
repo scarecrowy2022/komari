@@ -1,6 +1,7 @@
 package records
 
 import (
+	"errors"
 	"log"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/utils"
 )
 
 func RecordOne(rec models.Record) error {
@@ -172,50 +174,64 @@ func CompactRecord() error {
 		return err
 	}
 
-	if flags.DatabaseType == "sqlite" {
-		if err := db.Exec("VACUUM").Error; err != nil {
-			log.Printf("Error vacuuming database: %v", err)
-		}
-		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	if flags.IsSQLite() {
+		db.Exec("PRAGMA wal_checkpoint(PASSIVE);")
 	}
 	//log.Printf("Record compaction completed")
 	return nil
 }
 
 func migrateOldRecords(db *gorm.DB) error {
-	// 计算 4 小时前的时间
-	fourHoursAgo := time.Now().Add(-4 * time.Hour)
+	return migrateOldRecordsAt(db, time.Now())
+}
+
+func compactRecordCutoff(now time.Time) time.Time {
+	return now.Add(-4 * time.Hour).Truncate(15 * time.Minute)
+}
+
+func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
+	cutoff := compactRecordCutoff(now)
 
 	// 查询 records 表中超过 4 小时的记录
 	var records []models.Record
-	if err := db.Table("records").Where("time < ?", fourHoursAgo).Find(&records).Error; err != nil {
+	if err := db.Table("records").Where("time < ?", cutoff).Find(&records).Error; err != nil {
 		return err
 	}
 
 	if len(records) == 0 {
 		return nil
 	}
+	previousByClient, err := getPreviousTrafficRecordsBefore(db, records)
+	if err != nil {
+		return err
+	}
+	repairZeroTrafficDeltas(records, previousByClient)
 
 	// 按 Client 和 15 分钟时间段分组，并存储所有记录以计算分位数
 	type groupData struct {
-		Cpu            []float32
-		Gpu            []float32
-		Load           []float32
-		Temp           []float32
-		Ram            []int64
-		RamTotal       []int64
-		Swap           []int64
-		SwapTotal      []int64
-		Disk           []int64
-		DiskTotal      []int64
-		NetIn          []int64
-		NetOut         []int64
-		NetTotalUp     []int64
-		NetTotalDown   []int64
-		Process        []int
-		Connections    []int
-		ConnectionsUdp []int
-		Uptime         []int64
+		Cpu             []float32
+		Gpu             []float32
+		Load            []float32
+		Temp            []float32
+		Ram             []int64
+		RamTotal        []int64
+		Swap            []int64
+		SwapTotal       []int64
+		Disk            []int64
+		DiskTotal       []int64
+		NetIn           []int64
+		NetOut          []int64
+		NetTotalUp      []int64
+		NetTotalDown    []int64
+		TrafficUp       int64
+		TrafficDown     int64
+		LatestTime      time.Time
+		LatestTotalUp   int64
+		LatestTotalDown int64
+		Process         []int
+		Connections     []int
+		ConnectionsUdp  []int
+		Uptime          []int64
 	}
 
 	groupedRecords := make(map[string]*groupData)
@@ -239,6 +255,13 @@ func migrateOldRecords(db *gorm.DB) error {
 		data.NetOut = append(data.NetOut, record.NetOut)
 		data.NetTotalUp = append(data.NetTotalUp, record.NetTotalUp)
 		data.NetTotalDown = append(data.NetTotalDown, record.NetTotalDown)
+		data.TrafficUp += record.TrafficUp
+		data.TrafficDown += record.TrafficDown
+		if data.LatestTime.IsZero() || record.Time.ToTime().After(data.LatestTime) {
+			data.LatestTime = record.Time.ToTime()
+			data.LatestTotalUp = record.NetTotalUp
+			data.LatestTotalDown = record.NetTotalDown
+		}
 		data.Process = append(data.Process, record.Process)
 		data.Connections = append(data.Connections, record.Connections)
 		data.ConnectionsUdp = append(data.ConnectionsUdp, record.ConnectionsUdp)
@@ -332,8 +355,10 @@ func migrateOldRecords(db *gorm.DB) error {
 				DiskTotal:      getIntPercentile(data.DiskTotal, high_percentile),
 				NetIn:          getIntPercentile(data.NetIn, 0.2),
 				NetOut:         getIntPercentile(data.NetOut, 0.2),
-				NetTotalUp:     getIntPercentile(data.NetTotalUp, high_percentile),
-				NetTotalDown:   getIntPercentile(data.NetTotalDown, high_percentile),
+				NetTotalUp:     data.LatestTotalUp,
+				NetTotalDown:   data.LatestTotalDown,
+				TrafficUp:      data.TrafficUp,
+				TrafficDown:    data.TrafficDown,
 				Process:        getInt32Percentile(data.Process, high_percentile),
 				Connections:    getInt32Percentile(data.Connections, high_percentile),
 				ConnectionsUdp: getInt32Percentile(data.ConnectionsUdp, high_percentile),
@@ -353,7 +378,7 @@ func migrateOldRecords(db *gorm.DB) error {
 		}
 
 		// 删除 records 表中的旧数据
-		if err := tx.Table("records").Where("time < ?", fourHoursAgo.Add(-1*time.Hour)).Delete(&models.Record{}).Error; err != nil {
+		if err := tx.Table("records").Where("time < ?", cutoff.Add(-1*time.Hour)).Delete(&models.Record{}).Error; err != nil {
 			return err
 		}
 
@@ -361,13 +386,91 @@ func migrateOldRecords(db *gorm.DB) error {
 	})
 }
 
+func getPreviousTrafficRecordsBefore(db *gorm.DB, records []models.Record) (map[string]*models.Record, error) {
+	firstTimeByClient := make(map[string]time.Time)
+	for _, record := range records {
+		recordTime := record.Time.ToTime()
+		firstTime, ok := firstTimeByClient[record.Client]
+		if !ok || recordTime.Before(firstTime) {
+			firstTimeByClient[record.Client] = recordTime
+		}
+	}
+
+	previousByClient := make(map[string]*models.Record, len(firstTimeByClient))
+	for clientUUID, firstTime := range firstTimeByClient {
+		previous, err := getPreviousTrafficRecordBefore(db, clientUUID, firstTime)
+		if err != nil {
+			return nil, err
+		}
+		if previous != nil {
+			previousByClient[clientUUID] = previous
+		}
+	}
+	return previousByClient, nil
+}
+
+func getPreviousTrafficRecordBefore(db *gorm.DB, clientUUID string, before time.Time) (*models.Record, error) {
+	var latest *models.Record
+	for _, table := range []string{"records", "records_long_term"} {
+		var record models.Record
+		queryBefore := before
+		if table == "records_long_term" {
+			queryBefore = before.Truncate(15 * time.Minute)
+		}
+		err := db.Table(table).
+			Where("client = ? AND time < ?", clientUUID, models.FromTime(queryBefore)).
+			Order("time DESC").
+			First(&record).Error
+		if err == nil {
+			if latest == nil || record.Time.ToTime().After(latest.Time.ToTime()) {
+				latest = &record
+			}
+			continue
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+	return latest, nil
+}
+
+func repairZeroTrafficDeltas(records []models.Record, previousByClient map[string]*models.Record) {
+	recordsByClient := make(map[string][]*models.Record)
+	for i := range records {
+		recordsByClient[records[i].Client] = append(recordsByClient[records[i].Client], &records[i])
+	}
+
+	for _, clientRecords := range recordsByClient {
+		sort.Slice(clientRecords, func(i, j int) bool {
+			return clientRecords[i].Time.ToTime().Before(clientRecords[j].Time.ToTime())
+		})
+		var previous *models.Record
+		if previousByClient != nil {
+			previous = previousByClient[clientRecords[0].Client]
+		}
+		for _, current := range clientRecords {
+			if previous == nil {
+				previous = current
+				continue
+			}
+			if current.TrafficUp == 0 {
+				current.TrafficUp = utils.ComputeTrafficDelta(current.NetTotalUp, previous.NetTotalUp)
+			}
+			if current.TrafficDown == 0 {
+				current.TrafficDown = utils.ComputeTrafficDelta(current.NetTotalDown, previous.NetTotalDown)
+			}
+			previous = current
+		}
+	}
+}
+
 // migrateGPURecords 压缩GPU记录数据
 func migrateGPURecords(db *gorm.DB) error {
-	fourHoursAgo := time.Now().Add(-4 * time.Hour)
+	cutoff := compactRecordCutoff(time.Now())
 
 	// 查询超过4小时的GPU记录
 	var gpuRecords []models.GPURecord
-	if err := db.Where("time < ?", fourHoursAgo).Find(&gpuRecords).Error; err != nil {
+	if err := db.Where("time < ?", cutoff).Find(&gpuRecords).Error; err != nil {
 		return err
 	}
 
@@ -497,7 +600,7 @@ func migrateGPURecords(db *gorm.DB) error {
 		}
 
 		// 删除已压缩的原始GPU数据
-		if err := tx.Where("time < ?", fourHoursAgo.Add(-1*time.Hour)).Delete(&models.GPURecord{}).Error; err != nil {
+		if err := tx.Where("time < ?", cutoff.Add(-1*time.Hour)).Delete(&models.GPURecord{}).Error; err != nil {
 			return err
 		}
 

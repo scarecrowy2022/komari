@@ -7,25 +7,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/api/admin"
-	"github.com/komari-monitor/komari/api/admin/clipboard"
-	log_api "github.com/komari-monitor/komari/api/admin/log"
-	"github.com/komari-monitor/komari/api/admin/notification"
-	"github.com/komari-monitor/komari/api/admin/test"
-	"github.com/komari-monitor/komari/api/admin/update"
-	"github.com/komari-monitor/komari/api/client"
-	"github.com/komari-monitor/komari/api/jsonRpc"
-	public_api "github.com/komari-monitor/komari/api/public"
-	"github.com/komari-monitor/komari/api/terminal"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/pkg/corn"
+	"github.com/komari-monitor/komari/web/api"
 
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
@@ -34,19 +23,19 @@ import (
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
-	"github.com/komari-monitor/komari/public"
+	"github.com/komari-monitor/komari/pkg/config"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logutil "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
-	"github.com/komari-monitor/komari/utils/oauth"
+	"github.com/komari-monitor/komari/web/nezha"
+	"github.com/komari-monitor/komari/web/oauth"
+	report_cache "github.com/komari-monitor/komari/web/report"
+	"github.com/komari-monitor/komari/web/router"
+	"github.com/komari-monitor/komari/web/security"
 	"github.com/spf13/cobra"
-)
-
-var (
-	DynamicCorsEnabled bool = false
 )
 
 var ServerCmd = &cobra.Command{
@@ -74,7 +63,7 @@ func RunServer() {
 	if utils.VersionHash != "unknown" {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	conf, err := config.GetManyAs[config.Legacy]()
+	conf, err := config.GetManyAs[config.Settings]()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -86,7 +75,7 @@ func RunServer() {
 
 	if conf.NezhaCompatEnabled {
 		go func() {
-			if err := StartNezhaCompat(conf.NezhaCompatListen); err != nil {
+			if err := nezha.StartNezhaCompat(conf.NezhaCompatListen); err != nil {
 				log.Printf("Nezha compat server error: %v", err)
 				auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
 			}
@@ -113,12 +102,12 @@ func RunServer() {
 		if ok, t := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey); ok {
 			if t {
 				l, _ := config.GetAs[string](config.NezhaCompatListenKey)
-				if err := StartNezhaCompat(l); err != nil {
+				if err := nezha.StartNezhaCompat(l); err != nil {
 					log.Printf("start Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
 				}
 			} else {
-				if err := StopNezhaCompat(); err != nil {
+				if err := nezha.StopNezhaCompat(); err != nil {
 					log.Printf("stop Nezha compat server error: %v", err)
 					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
 				}
@@ -127,24 +116,15 @@ func RunServer() {
 
 	})
 	// 初始化 cloudflared
-	if strings.ToLower(GetEnv("KOMARI_ENABLE_CLOUDFLARED", "false")) == "true" {
-		err := cloudflared.RunCloudflared() // 阻塞，确保cloudflared跑起来
-		if err != nil {
-			log.Fatalf("Failed to run cloudflared: %v", err)
-		}
+	if err := cloudflared.AutoStart(GetEnv("KOMARI_CLOUDFLARED_TOKEN", "")); err != nil {
+		log.Printf("failed to auto start cloudflared: %v", err)
 	}
 
 	r := gin.New()
 	r.Use(logutil.GinLogger())
 	r.Use(logutil.GinRecovery())
 
-	// 动态 CORS 中间件
-
-	DynamicCorsEnabled = conf.AllowCors
 	config.Subscribe(func(event config.ConfigEvent) {
-		if ok, t := config.IsChangedT[bool](event, config.AllowCorsKey); ok {
-			DynamicCorsEnabled = t
-		}
 		if event.IsChanged(config.GeoIpProviderKey) {
 			go geoip.InitGeoIp()
 		}
@@ -154,21 +134,7 @@ func RunServer() {
 		}
 
 	})
-	r.Use(func(c *gin.Context) {
-		if DynamicCorsEnabled {
-			c.Header("Access-Control-Allow-Origin", "*")
-			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
-			c.Header("Access-Control-Allow-Headers", "Origin, Content-Length, Content-Type, Authorization, Accept, X-CSRF-Token, X-Requested-With, Set-Cookie")
-			c.Header("Access-Control-Expose-Headers", "Content-Length, Authorization, Set-Cookie")
-			c.Header("Access-Control-Allow-Credentials", "true")
-			c.Header("Access-Control-Max-Age", "43200") // 12 hours
-			if c.Request.Method == "OPTIONS" {
-				c.AbortWithStatus(204)
-				return
-			}
-		}
-		c.Next()
-	})
+	r.Use(security.CorsMiddleware(conf.CorsOriginCheckEnabled, conf.CorsAllowedOrigins))
 
 	r.Use(api.IdentityMiddleware())
 	r.Use(api.PrivateSiteMiddleware())
@@ -180,171 +146,7 @@ func RunServer() {
 		c.Next()
 	})
 
-	r.Any("/ping", func(c *gin.Context) {
-		c.String(200, "pong")
-	})
-	// #region 公开路由
-	r.POST("/api/login", public_api.Login)
-	r.GET("/api/me", public_api.GetMe)
-	r.GET("/api/clients", api.GetClients)
-	r.GET("/api/nodes", public_api.GetNodesInformation)
-	r.GET("/api/public", public_api.GetPublicSettings)
-	r.GET("/api/oauth", public_api.OAuth)
-	r.GET("/api/oauth_callback", public_api.OAuthCallback)
-	r.GET("/api/logout", public_api.Logout)
-	r.GET("/api/version", public_api.GetVersion)
-	r.GET("/api/recent/:uuid", public_api.GetClientRecentRecords)
-
-	r.GET("/api/records/load", public_api.GetRecordsByUUID)
-	r.GET("/api/records/ping", public_api.GetPingRecords)
-	r.GET("/api/task/ping", public_api.GetPublicPingTasks)
-	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
-	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
-	r.GET("/api/mjpeg_live", public_api.MjpegLiveHandler)
-	// #region Agent
-	r.POST("/api/clients/register", client.RegisterClient)
-	tokenAuthrized := r.Group("/api/clients", api.RequireRole(api.RoleAdmin, api.RoleClient))
-	{
-		tokenAuthrized.GET("/report", client.WebSocketReport) // websocket
-		tokenAuthrized.POST("/uploadBasicInfo", client.UploadBasicInfo)
-		tokenAuthrized.POST("/report", client.UploadReport)
-		tokenAuthrized.GET("/terminal", terminal.EstablishConnection)
-		tokenAuthrized.POST("/task/result", client.TaskResult)
-		tokenAuthrized.GET("/ping/tasks", client.GetPingTasks)
-		tokenAuthrized.POST("/ping/result", client.UploadPingResult)
-	}
-	// #region 管理员
-	adminAuthrized := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
-	{
-		adminAuthrized.GET("/download/backup", admin.DownloadBackup)
-		adminAuthrized.POST("/upload/backup", admin.UploadBackup)
-		// test
-		testGroup := adminAuthrized.Group("/test")
-		{
-			testGroup.GET("/geoip", test.TestGeoIp)
-			testGroup.POST("/sendMessage", test.TestSendMessage)
-		}
-		// update
-		updateGroup := adminAuthrized.Group("/update")
-		{
-			updateGroup.POST("/mmdb", update.UpdateMmdbGeoIP)
-			updateGroup.POST("/user", update.UpdateUser)
-			updateGroup.PUT("/favicon", update.UploadFavicon)
-			updateGroup.POST("/favicon", update.DeleteFavicon)
-		}
-		// tasks
-		taskGroup := adminAuthrized.Group("/task")
-		{
-			taskGroup.GET("/all", admin.GetTasks)
-			taskGroup.POST("/exec", admin.Exec)
-			taskGroup.GET("/:task_id", admin.GetTaskById)
-			taskGroup.GET("/:task_id/result", admin.GetTaskResultsByTaskId)
-			taskGroup.GET("/:task_id/result/:uuid", admin.GetSpecificTaskResult)
-			taskGroup.GET("/client/:uuid", admin.GetTasksByClientId)
-		}
-		// settings
-		settingsGroup := adminAuthrized.Group("/settings")
-		{
-			settingsGroup.GET("/", admin.GetSettings)
-			settingsGroup.POST("/", admin.EditSettings)
-			settingsGroup.POST("/oidc", admin.SetOidcProvider)
-			settingsGroup.GET("/oidc", admin.GetOidcProvider)
-			settingsGroup.POST("/message-sender", admin.SetMessageSenderProvider)
-			settingsGroup.GET("/message-sender", admin.GetMessageSenderProvider)
-		}
-		// themes
-		themeGroup := adminAuthrized.Group("/theme")
-		{
-			themeGroup.PUT("/upload", admin.UploadTheme)
-			themeGroup.GET("/list", admin.ListThemes)
-			themeGroup.POST("/delete", admin.DeleteTheme)
-			themeGroup.GET("/set", admin.SetTheme)
-			themeGroup.POST("/update", admin.UpdateTheme)
-			themeGroup.POST("/import", admin.ImportTheme)
-			themeGroup.POST("/settings", admin.UpdateThemeSettings)
-		}
-		// clients
-		clientGroup := adminAuthrized.Group("/client")
-		{
-			clientGroup.POST("/add", admin.AddClient)
-			clientGroup.GET("/list", admin.ListClients)
-			clientGroup.GET("/:uuid", admin.GetClient)
-			clientGroup.POST("/:uuid/edit", admin.EditClient)
-			clientGroup.POST("/:uuid/remove", admin.RemoveClient)
-			clientGroup.GET("/:uuid/token", admin.GetClientToken)
-			clientGroup.POST("/order", admin.OrderWeight)
-			// client terminal
-			clientGroup.GET("/:uuid/terminal", terminal.RequestTerminal)
-		}
-
-		// records
-		recordGroup := adminAuthrized.Group("/record")
-		{
-			recordGroup.POST("/clear", admin.ClearRecord)
-			recordGroup.POST("/clear/all", admin.ClearAllRecords)
-		}
-		// oauth2
-		oauth2Group := adminAuthrized.Group("/oauth2")
-		{
-			oauth2Group.GET("/bind", admin.BindingExternalAccount)
-			oauth2Group.POST("/unbind", admin.UnbindExternalAccount)
-		}
-		sessionGroup := adminAuthrized.Group("/session")
-		{
-			sessionGroup.GET("/get", admin.GetSessions)
-			sessionGroup.POST("/remove", admin.DeleteSession)
-			sessionGroup.POST("/remove/all", admin.DeleteAllSession)
-		}
-		two_factorGroup := adminAuthrized.Group("/2fa")
-		{
-			two_factorGroup.GET("/generate", admin.Generate2FA)
-			two_factorGroup.POST("/enable", admin.Enable2FA)
-			two_factorGroup.POST("/disable", admin.Disable2FA)
-		}
-		adminAuthrized.GET("/logs", log_api.GetLogs)
-
-		// clipboard
-		clipboardGroup := adminAuthrized.Group("/clipboard")
-		{
-			clipboardGroup.GET("/:id", clipboard.GetClipboard)
-			clipboardGroup.GET("", clipboard.ListClipboard)
-			clipboardGroup.POST("", clipboard.CreateClipboard)
-			clipboardGroup.POST("/:id", clipboard.UpdateClipboard)
-			clipboardGroup.POST("/remove", clipboard.BatchDeleteClipboard)
-			clipboardGroup.POST("/:id/remove", clipboard.DeleteClipboard)
-		}
-
-		notificationGroup := adminAuthrized.Group("/notification")
-		{
-			// offline notifications
-			notificationGroup.GET("/offline", notification.ListOfflineNotifications)
-			notificationGroup.POST("/offline/edit", notification.EditOfflineNotification)
-			notificationGroup.POST("/offline/enable", notification.EnableOfflineNotification)
-			notificationGroup.POST("/offline/disable", notification.DisableOfflineNotification)
-			loadAlertGroup := notificationGroup.Group("/load")
-			{
-				loadAlertGroup.GET("/", notification.GetAllLoadNotifications)
-				loadAlertGroup.POST("/add", notification.AddLoadNotification)
-				loadAlertGroup.POST("/delete", notification.DeleteLoadNotification)
-				loadAlertGroup.POST("/edit", notification.EditLoadNotification)
-			}
-		}
-
-		pingTaskGroup := adminAuthrized.Group("/ping")
-		{
-			pingTaskGroup.GET("/", admin.GetAllPingTasks)
-			pingTaskGroup.POST("/add", admin.AddPingTask)
-			pingTaskGroup.POST("/delete", admin.DeletePingTask)
-			pingTaskGroup.POST("/edit", admin.EditPingTask)
-			pingTaskGroup.POST("/order", admin.OrderPingTask)
-
-		}
-
-	}
-
-	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
-		r.NoRoute(handlers...)
-	})
+	router.Register(r)
 
 	srv := &http.Server{
 		Addr:    flags.Listen,
@@ -370,18 +172,6 @@ func RunServer() {
 }
 
 func InitDatabase() {
-	// // 打印数据库类型和连接信息
-	// if flags.DatabaseType == "mysql" {
-	// 	log.Printf("使用 MySQL 数据库连接: %s@%s:%s/%s",
-	// 		flags.DatabaseUser, flags.DatabaseHost, flags.DatabasePort, flags.DatabaseName)
-	// 	log.Printf("环境变量配置: [KOMARI_DB_TYPE=%s] [KOMARI_DB_HOST=%s] [KOMARI_DB_PORT=%s] [KOMARI_DB_USER=%s] [KOMARI_DB_NAME=%s]",
-	// 		os.Getenv("KOMARI_DB_TYPE"), os.Getenv("KOMARI_DB_HOST"), os.Getenv("KOMARI_DB_PORT"),
-	// 		os.Getenv("KOMARI_DB_USER"), os.Getenv("KOMARI_DB_NAME"))
-	// } else {
-	// 	log.Printf("使用 SQLite 数据库文件: %s", flags.DatabaseFile)
-	// 	log.Printf("环境变量配置: [KOMARI_DB_TYPE=%s] [KOMARI_DB_FILE=%s]",
-	// 		os.Getenv("KOMARI_DB_TYPE"), os.Getenv("KOMARI_DB_FILE"))
-	// }
 	var count int64 = 0
 	if dbcore.GetDBInstance().Model(&models.User{}).Count(&count); count == 0 {
 		user, passwd, err := accounts.CreateDefaultAdminAccount()
@@ -394,41 +184,54 @@ func InitDatabase() {
 
 // #region 定时任务
 func DoScheduledWork() {
-	tasks.ReloadPingSchedule()
-	d_notification.ReloadLoadNotificationSchedule()
-	ticker := time.NewTicker(time.Minute * 30)
-	minute := time.NewTicker(60 * time.Second)
-	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
-	records.CompactRecord()
-	go notifier.CheckExpireScheduledWork()
-	for {
-		cfg, _ := config.GetManyAs[config.Legacy]()
-		select {
-		case <-ticker.C:
-			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			records.CompactRecord()
-			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
-			auditlog.RemoveOldLogs()
-		case <-minute.C:
-			api.SaveClientReportToDB()
-			if !cfg.RecordEnabled {
-				records.DeleteAll()
-				tasks.DeleteAllPingRecords()
-			}
-			// 每分钟检查一次流量提醒
-			go notifier.CheckTraffic()
-		}
+	if err := tasks.ReloadPingSchedule(); err != nil {
+		log.Println("Failed to reload ping schedule:", err)
 	}
+	if err := d_notification.ReloadLoadNotificationSchedule(); err != nil {
+		log.Println("Failed to reload load notification schedule:", err)
+	}
+	records.CompactRecord()
 
+	if err := corn.AddFunc("records:cleanup", "@every 30m", cleanupScheduledData); err != nil {
+		log.Println("Failed to add cleanup scheduled task:", err)
+	}
+	if err := corn.AddFunc("records:minute", "@every 1m", minuteScheduledWork); err != nil {
+		log.Println("Failed to add minute scheduled task:", err)
+	}
+	if err := corn.AddFunc("notifier:expire", "0 0 9 * * *", notifier.CheckExpireScheduledWork); err != nil {
+		log.Println("Failed to add expire notification scheduled task:", err)
+	}
+	notifier.InitTrafficReportSchedule()
+}
+
+func cleanupScheduledData() {
+	cfg, _ := config.GetManyAs[config.Settings]()
+	records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
+	records.CompactRecord()
+	tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
+	tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
+	auditlog.RemoveOldLogs()
+	accounts.RemoveExpiredSessions()
+}
+
+func minuteScheduledWork() {
+	cfg, _ := config.GetManyAs[config.Settings]()
+	report_cache.SaveClientReportToDB()
+	if !cfg.RecordEnabled {
+		records.DeleteAll()
+		tasks.DeleteAllPingRecords()
+	}
+	// 每分钟检查一次流量提醒
+	notifier.CheckTraffic()
 }
 
 func OnShutdown() {
 	auditlog.Log("", "", "server is shutting down", "info")
-	cloudflared.Kill()
+	corn.StopAll()
+	cloudflared.Shutdown()
 }
 
 func OnFatal(err error) {
 	auditlog.Log("", "", "server encountered a fatal error: "+err.Error(), "error")
-	cloudflared.Kill()
+	cloudflared.Shutdown()
 }
