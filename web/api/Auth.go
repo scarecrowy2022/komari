@@ -108,7 +108,7 @@ var publicPaths = []string{
 	"/api/recent",
 	"/api/admin",    // 由 RequireRole 处理
 	"/api/clients/", // 由 RequireRole 处理
-	"/admin",        // 登录页
+
 }
 
 // PrivateSiteMiddleware 私有站点访问控制。
