@@ -130,18 +130,11 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 			}
 		}
 
-          // 非 API 路径放行（静态资源等）
-             if !strings.HasPrefix(path, "/api") {
-          // 只放行静态资源，HTML 页面请求重定向到根路径
-            if strings.Contains(path, ".") {
-               c.Next()
-             return
-           }
-    c.Redirect(http.StatusFound, "/")
-    c.Abort()
+// 非 API 路径放行（静态资源等）
+if !strings.HasPrefix(path, "/api") {
+    c.Next()
     return
 }
-
 		// 非私有站点直接放行
 		privateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
 		if err != nil {
