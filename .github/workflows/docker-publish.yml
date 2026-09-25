@@ -82,6 +82,9 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Generate time tag
+        run: echo "TIME_TAG=$(TZ='Asia/Taipei' date +'%Y%m%d-%H%M')" >> $GITHUB_ENV
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
@@ -89,7 +92,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest
-            type=raw,value=v2026.05
+            type=raw,value=${{ env.TIME_TAG }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
