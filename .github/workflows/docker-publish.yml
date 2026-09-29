@@ -60,7 +60,7 @@ jobs:
           CGO_ENABLED: 1
           GIN_MODE: release
         run: |
-          VERSION="v2026.05"
+          VERSION="v$(date +'%Y.%m')"
           VERSION_HASH="YJ_Mod"
           LDFLAGS="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X 'github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}'"
 
