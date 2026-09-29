@@ -95,7 +95,7 @@ func registerAdminRoutes(r *gin.Engine) {
 	// theme 含文件上传，保留 REST handler。
 	theme := g.Group("/theme")
 	{
-		theme.PUT("/upload", admin.UploadTheme)
+		// theme.PUT("/upload", admin.UploadTheme)
 		theme.GET("/list", admin.ListThemes)
 		theme.POST("/delete", admin.DeleteTheme)
 		theme.GET("/set", admin.SetTheme)
@@ -103,6 +103,13 @@ func registerAdminRoutes(r *gin.Engine) {
 		theme.POST("/import", admin.ImportTheme)
 		theme.POST("/settings", admin.UpdateThemeSettings)
 	}
+	uploadGroup := g.Group("/upload")
+{
+    uploadGroup.POST("/init", admin.UploadInit)
+    uploadGroup.POST("/chunk", admin.UploadChunk)
+    uploadGroup.POST("/merge", admin.UploadMerge)
+    uploadGroup.POST("/cancel", admin.UploadCancel)
+}
 
 	// 2FA 含二维码 PNG / 敏感操作，保留 REST handler。
 	twoFactor := g.Group("/2fa")
