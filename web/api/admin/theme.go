@@ -22,13 +22,13 @@ import (
 )
 
 // UploadTheme 上传主题
-func UploadTheme(c *gin.Context) {
-	// 读取上传的文件内容
-	data, err := io.ReadAll(c.Request.Body)
-	if err != nil || len(data) == 0 {
-		api.RespondError(c, http.StatusBadRequest, "请选择要上传的主题文件")
-		return
-	}
+// func UploadTheme(c *gin.Context) {
+// 	// 读取上传的文件内容
+// 	data, err := io.ReadAll(c.Request.Body)
+// 	if err != nil || len(data) == 0 {
+// 		api.RespondError(c, http.StatusBadRequest, "请选择要上传的主题文件")
+// 		return
+// 	}
 
 	// 临时文件名
 	tempFile := filepath.Join(os.TempDir(), "uploaded_theme.zip")
